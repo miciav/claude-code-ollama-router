@@ -1,0 +1,20 @@
+services:
+  ollama-admin:
+    image: ghcr.io/ollama-admin/ollama-admin:latest
+    user: "0:0"
+    network_mode: host
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      DATABASE_URL: file:/data/ollama-admin.db
+      DEFAULT_OLLAMA_URL: http://127.0.0.1:11434
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?genera con: openssl rand -hex 32}
+      NEXTAUTH_URL: http://localhost:3000
+      LOG_RETENTION_DAYS: 90
+      GPU_AGENT_ENABLED: "true"
+    volumes:
+      - ollama-admin-data:/data
+    restart: unless-stopped
+
+volumes:
+  ollama-admin-data:

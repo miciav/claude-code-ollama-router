@@ -1,0 +1,21 @@
+[Unit]
+Description=GB10 GPU Agent per ollama-admin (memoria unificata da /proc/meminfo)
+Documentation=https://github.com/ollama-admin/ollama-admin
+After=network.target
+
+[Service]
+Type=exec
+User=%i
+WorkingDirectory=/home/%i/gb10-gpu-agent
+ExecStart=/home/%i/gb10-gpu-agent/.venv/bin/uvicorn gb10_agent:app --host 127.0.0.1 --port 11436
+Restart=on-failure
+RestartSec=5
+# Non serve altro che leggere /proc e lanciare nvidia-smi.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/%i/gb10-gpu-agent
+
+[Install]
+WantedBy=multi-user.target
