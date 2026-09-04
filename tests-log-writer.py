@@ -1,5 +1,21 @@
-import os, sqlite3, time, tempfile
-db = os.path.join(tempfile.mkdtemp(), "t.db")
+"""Verifica il writer della tabella Log estraendo il proxy dallo script.
+
+    python3 tests-log-writer.py
+"""
+import os, re, sqlite3, sys, tempfile, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+WORK = tempfile.mkdtemp()
+
+# Il proxy vive dentro un heredoc dello script: lo estraiamo cosi' il test
+# controlla il codice che gira davvero, non una copia che puo' divergere.
+script = open(os.path.join(HERE, "claude-qwen-auto-v4.sh"), encoding="utf-8").read()
+body = re.search(r'cat >"\$PROXY_SCRIPT" <<\'PY\'\n(.*?)\nPY\n', script, re.S)
+assert body, "heredoc del proxy non trovato in claude-qwen-auto-v4.sh"
+open(os.path.join(WORK, "proxy2.py"), "w", encoding="utf-8").write(body.group(1))
+sys.path.insert(0, WORK)
+
+db = os.path.join(WORK, "t.db")
 c = sqlite3.connect(db)
 c.executescript('''
 CREATE TABLE "Server" ("id" TEXT NOT NULL PRIMARY KEY, "name" TEXT, "url" TEXT,
