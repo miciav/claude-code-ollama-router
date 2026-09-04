@@ -93,6 +93,11 @@ GPU_AGENT_DIR="${GPU_AGENT_DIR:-$HOME/gb10-gpu-agent}"
 # raggiunge comunque su 127.0.0.1.
 GPU_AGENT_BIND="${GPU_AGENT_BIND:-127.0.0.1}"
 
+# Database di ollama-admin: se presente e scrivibile, il proxy vi registra una
+# riga per richiesta (token inclusi). Vuoto = funzione disattivata.
+OA_DB="${OA_DB:-$HOME/ollama-admin-data/ollama-admin.db}"
+OA_SERVER_ID="${OA_SERVER_ID:-}"
+
 # Claude Code global output fuse for ordinary agent requests.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-40000}"
 
@@ -581,8 +586,11 @@ write_proxy() {
 import http.client
 import json
 import os
+import sqlite3
 import sys
+import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -592,6 +600,12 @@ LISTEN_PORT = int(os.environ["PROXY_PORT"])
 MAIN_MODEL = os.environ["MAIN_MODEL"]
 MAIN_MAX_OUTPUT = int(os.environ["MAIN_MAX_OUTPUT_TOKENS"])
 CLASSIFIER_MAX_OUTPUT = int(os.environ["CLASSIFIER_MAX_OUTPUT_TOKENS"])
+
+# Scrittura opzionale nel database di ollama-admin. Il loro proxy non conta i
+# token (registra prima di leggere il corpo della risposta), quindi la riga la
+# scrive chi quel dato ce l'ha davvero: noi, a stream concluso.
+OA_DB = os.environ.get("OA_DB", "")
+OA_SERVER_ID = os.environ.get("OA_SERVER_ID", "")
 
 WATCHDOG_ENABLED = os.environ.get("WATCHDOG_ENABLED", "1") == "1"
 WATCHDOG_MIN_REPEATED_CHARS = int(os.environ.get("WATCHDOG_MIN_REPEATED_CHARS", "4096"))
@@ -607,6 +621,52 @@ HOP_BY_HOP = {
 
 MAIN_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
 BACKGROUND_SAMPLING = {"temperature": 0.7, "top_p": 0.80, "top_k": 20}
+
+
+_DB_LOCK = threading.Lock()
+
+
+def record_log(model, endpoint, prompt_tokens, completion_tokens, latency_ms, status_code):
+    """Inserisce una riga nella tabella Log di ollama-admin.
+
+    Best effort e fuori dal percorso della risposta: la dashboard e' un extra,
+    un suo problema non deve mai propagarsi a Claude Code. Ci accoppia allo
+    schema di un progetto di terze parti, quindi ogni errore viene loggato e
+    ingoiato: se rinominano una colonna, lo si vede nel log del proxy.
+    """
+    if not OA_DB or not OA_SERVER_ID:
+        return
+
+    def write():
+        try:
+            with _DB_LOCK:
+                conn = sqlite3.connect(OA_DB, timeout=5)
+                try:
+                    conn.execute("PRAGMA busy_timeout=5000")
+                    conn.execute(
+                        'INSERT INTO "Log" ("id","serverId","model","endpoint",'
+                        '"promptTokens","completionTokens","latencyMs","statusCode","createdAt")'
+                        " VALUES (?,?,?,?,?,?,?,?,?)",
+                        (
+                            uuid.uuid4().hex,
+                            OA_SERVER_ID,
+                            model,
+                            endpoint,
+                            prompt_tokens or None,
+                            completion_tokens or None,
+                            int(latency_ms),
+                            int(status_code),
+                            int(time.time() * 1000),  # Prisma/SQLite: ms epoch
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception as exc:
+            sys.stderr.write("LOG_WRITE_FAILED %s\n" % exc)
+            sys.stderr.flush()
+
+    threading.Thread(target=write, daemon=True).start()
 
 
 def iter_strings(value):
@@ -982,6 +1042,14 @@ class Proxy(BaseHTTPRequestHandler):
                     now - started,
                     " ABORTED" if aborted else "",
                 )
+                record_log(
+                    model=str(request_model or route),
+                    endpoint=self.path,
+                    prompt_tokens=in_tokens,
+                    completion_tokens=out_tokens,
+                    latency_ms=(now - started) * 1000,
+                    status_code=resp.status,
+                )
             else:
                 while True:
                     chunk = resp.read1(65536)
@@ -1050,8 +1118,32 @@ stop_proxy() {
     fi
 }
 
+detect_oa_server() {
+    # Nessun DB o nessun permesso di scrittura: la funzione resta spenta.
+    [[ -n "$OA_DB" && -w "$OA_DB" ]] || { OA_DB=""; return 0; }
+    [[ -z "$OA_SERVER_ID" ]] || return 0
+
+    OA_SERVER_ID=$(python3 - "$OA_DB" <<'PY' 2>/dev/null || true
+import sqlite3, sys
+try:
+    conn = sqlite3.connect(sys.argv[1], timeout=5)
+    row = conn.execute('SELECT id FROM "Server" ORDER BY "createdAt" LIMIT 1').fetchone()
+    print(row[0] if row else "")
+except Exception:
+    pass
+PY
+)
+    if [[ -n "$OA_SERVER_ID" ]]; then
+        echo "      Metriche -> ollama-admin (server $OA_SERVER_ID)"
+    else
+        OA_DB=""
+        echo "      ollama-admin: nessun server configurato, metriche disattivate"
+    fi
+}
+
 start_proxy() {
     echo "[5/6] Avvio il proxy Anthropic/Auto-mode..."
+    detect_oa_server
     stop_proxy
     write_proxy
 
@@ -1067,6 +1159,8 @@ start_proxy() {
     WATCHDOG_MIN_OCCURRENCES="$WATCHDOG_MIN_OCCURRENCES" \
     WATCHDOG_TAIL_CHARS="$WATCHDOG_TAIL_CHARS" \
     WATCHDOG_CHAR_RUN="$WATCHDOG_CHAR_RUN" \
+    OA_DB="$OA_DB" \
+    OA_SERVER_ID="$OA_SERVER_ID" \
         nohup python3 "$PROXY_SCRIPT" >"$PROXY_LOG" 2>&1 &
 
     local pid=$!
