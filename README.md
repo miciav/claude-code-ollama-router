@@ -63,6 +63,40 @@ della KV cache: prompt grande con TTFT breve significa prefisso riusato.
 tail -f ~/.cache/claude-qwen/anthropic-proxy.log | grep STATS
 ```
 
+### Metriche dentro la dashboard
+
+ollama-admin non puo' contare i token: il suo proxy chiama `logAsync` subito
+dopo `await fetch()`, quando sono arrivati solo gli header, e poi inoltra
+`ollamaRes.body` senza leggerlo. I campi `promptTokens`/`completionTokens`
+della tabella `Log` restano vuoti su quel percorso — li popola solo la loro
+Chat integrata.
+
+Il proxy di questo progetto attraversa gia' lo stream (per il watchdog) e a
+fine risposta conosce i token: scrive lui la riga in `Log`. La scrittura e'
+best effort, in un thread separato: un errore viene loggato come
+`LOG_WRITE_FAILED` e non tocca la richiesta in corso.
+
+Serve che il database sia scrivibile dall'utente che lancia lo script. Con
+l'installazione standard vive in un volume Docker di proprieta' di root: il
+`docker-compose.yml` qui usa un bind mount e `user: "1000:1000"` per evitarlo.
+
+```bash
+OA_DB=~/ollama-admin-data/ollama-admin.db   # default
+OA_SERVER_ID=                               # rilevato dal DB se vuoto
+OA_DB= ./claude-qwen-auto-v4.sh             # disattiva la scrittura
+```
+
+Il test del writer gira contro uno schema replica, estraendo il proxy dallo
+script cosi' da verificare il codice che gira davvero:
+
+```bash
+python3 tests-log-writer.py
+```
+
+**Accoppiamento:** dipende dallo schema Prisma di un progetto di terze parti.
+Se rinominano una colonna la scrittura smette, in modo visibile nel log e
+senza conseguenze sulle richieste.
+
 ## Note specifiche per DGX Spark / GB10
 
 Tre cose che su questa piattaforma non funzionano come altrove.
